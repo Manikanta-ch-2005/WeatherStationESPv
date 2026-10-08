@@ -1177,6 +1177,35 @@ class WeatherStation:
             self
         )
 
+    def _check_ota_version(self, wdt):
+        gc.collect()
+        free_heap = gc.mem_free()
+        if free_heap < self.ota.MIN_HEAP:
+            print("[OTA] Version check skipped: {} bytes free.".format(free_heap))
+            return
+
+        local_version = read_firmware_version()
+        print("[OTA] Checking version only ({} bytes free)...".format(free_heap))
+
+        try:
+            wdt.feed()
+            remote_version = self.ota._fetch_version()
+            wdt.feed()
+            print("[OTA] Device: {}; GitHub: {}".format(
+                local_version,
+                remote_version
+            ))
+
+            if remote_version and remote_version != local_version:
+                print("[OTA] Update available; rebooting to install at boot.")
+                time.sleep(1)
+                machine.reset()
+            else:
+                print("[OTA] Firmware is up to date.")
+        except Exception as exc:
+            gc.collect()
+            print("[OTA] Version check failed:", exc)
+
     def _buffer_data(self):
         # Store a copy so future sensor reads do not modify buffered records.
         self.offline_buffer.append(
@@ -1231,7 +1260,7 @@ class WeatherStation:
                 ):
                     last_ota_check_ms = time.ticks_ms()
                     gc.collect()
-                    self.ota.check_for_updates(wdt)
+                    self._check_ota_version(wdt)
                     wdt.feed()
 
                 # Handle local web dashboard/settings.

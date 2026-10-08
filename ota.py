@@ -1,76 +1,152 @@
-import urequests as requests
-import json
+import gc
 import machine
+import network
 import os
 import time
+import urequests
 
-VERSION_FILE = "version.json"
 
-class OTAEngine:
-    def __init__(self, raw_base_url):
-        # Format: "https://raw.githubusercontent.com/<USER>/<REPO>/<BRANCH>"
-        self.base_url = raw_base_url.rstrip("/")
+class OTAUpdater:
+    MIN_HEAP = 50000
 
-    def get_local_version(self):
+    def __init__(self, config):
+        self.config = config
+        self.repo_api = config.get("ota_repo_api", "").rstrip("/")
+        self.branch = config.get("ota_branch", "main")
+        self.token = config.get("ota_token", "")
+        repo_path = self.repo_api.split("/repos/", 1)[-1]
+        self.repo_path = repo_path.split("/contents", 1)[0]
+
+    def _headers(self):
+        headers = {
+            "User-Agent": "ESP32-MicroPython-OTA",
+            "Accept": "application/vnd.github.raw+json",
+            "Connection": "close"
+        }
+        if self.token and self.token != "YOUR_GITHUB_TOKEN":
+            headers["Authorization"] = "token " + self.token
+        return headers
+
+    def _url(self, filename):
+        return "https://raw.githubusercontent.com/{}/{}/{}".format(
+            self.repo_path,
+            self.branch,
+            filename
+        )
+
+    def _remove(self, filename):
         try:
-            with open(VERSION_FILE, "r") as f:
-                return json.load(f).get("version", "0.0.0")
-        except (OSError, ValueError):
-            return "0.0.0"
+            os.remove(filename)
+        except OSError:
+            pass
 
-    def check_and_update(self, files=["main.py"]):
+    def _fetch_version(self):
+        response = urequests.get(
+            self._url("version.txt"),
+            headers=self._headers()
+        )
         try:
-            v_url = f"{self.base_url}/version.json"
-            print(f"[OTA] Checking for updates at: {v_url}")
-            res = requests.get(v_url)
-            
-            if res.status_code != 200:
-                print(f"[OTA] Version check failed with HTTP {res.status_code}")
-                res.close()
-                return False
-            
-            remote_ver = res.json().get("version")
-            res.close()
-            local_ver = self.get_local_version()
+            if response.status_code != 200:
+                raise OSError("GitHub version HTTP {}".format(response.status_code))
+            return response.text.strip()
+        finally:
+            response.close()
 
-            if remote_ver == local_ver or not remote_ver:
-                print(f"[OTA] Device is up-to-date (v{local_ver}).")
-                return False
+    def _download_main(self):
+        response = urequests.get(
+            self._url("main.py"),
+            headers=self._headers()
+        )
+        total = 0
+        try:
+            if response.status_code != 200:
+                raise OSError("GitHub main.py HTTP {}".format(response.status_code))
+            with open("main.new.py", "wb") as firmware_file:
+                while True:
+                    chunk = response.raw.read(512)
+                    if not chunk:
+                        break
+                    firmware_file.write(chunk)
+                    total += len(chunk)
+                    del chunk
+        finally:
+            response.close()
+            gc.collect()
+        return total
 
-            print(f"[OTA] Update found: v{local_ver} -> v{remote_ver}. Downloading files...")
-            
-            # Download new files to a temporary buffer first to prevent file corruption
-            for fname in files:
-                f_url = f"{self.base_url}/{fname}"
-                print(f"[OTA] Fetching {f_url}...")
-                res = requests.get(f_url)
-                
-                if res.status_code == 200:
-                    with open(fname + ".tmp", "w") as f:
-                        f.write(res.text)
-                    res.close()
-                    
-                    # Atomic file swap
-                    try:
-                        os.remove(fname)
-                    except OSError:
-                        pass
-                    os.rename(fname + ".tmp", fname)
-                    print(f"[OTA] Replaced {fname} successfully.")
-                else:
-                    res.close()
-                    print(f"[OTA] Error downloading {fname} (HTTP {res.status_code}). Aborting.")
-                    return False
+    def _install(self, remote_version):
+        self._remove("main.bak.py")
+        try:
+            os.rename("main.py", "main.bak.py")
+        except OSError:
+            pass
 
-            # Update the local version record
-            with open(VERSION_FILE, "w") as f:
-                json.dump({"version": remote_ver}, f)
+        try:
+            os.rename("main.new.py", "main.py")
+        except Exception:
+            try:
+                os.rename("main.bak.py", "main.py")
+            except OSError:
+                pass
+            raise
 
-            print("[OTA] Update successfully installed! Rebooting ESP32...")
-            time.sleep(2)
+        with open("version.txt", "w") as version_file:
+            version_file.write(remote_version)
+
+    def check_for_updates(self):
+        if "api.github.com/repos/" not in self.repo_api or "/contents" not in self.repo_api:
+            print("[OTA] Invalid GitHub repository API URL; skipping.")
+            return
+
+        wlan = network.WLAN(network.STA_IF)
+        wlan.active(True)
+        if not wlan.isconnected():
+            ssid = self.config.get("wifi_ssid", "")
+            password = self.config.get("wifi_pass", "")
+            if not ssid:
+                print("[OTA] Wi-Fi SSID missing; skipping.")
+                return
+            wlan.connect(ssid, password)
+            timeout = 15
+            while not wlan.isconnected() and timeout > 0:
+                time.sleep(1)
+                timeout -= 1
+
+        if not wlan.isconnected():
+            print("[OTA] Wi-Fi unavailable; skipping.")
+            wlan.active(False)
+            return
+
+        gc.collect()
+        free_heap = gc.mem_free()
+        if free_heap < self.MIN_HEAP:
+            print("[OTA] Low heap ({} bytes); skipping.".format(free_heap))
+            return
+
+        try:
+            with open("version.txt", "r") as version_file:
+                local_version = version_file.read().strip()
+        except OSError:
+            local_version = "0"
+
+        print("[OTA] Checking GitHub ({} bytes free)...".format(free_heap))
+        try:
+            remote_version = self._fetch_version()
+            if not remote_version or remote_version == local_version:
+                print("[OTA] Firmware is up to date.")
+                return
+
+            gc.collect()
+            self._remove("main.new.py")
+            downloaded = self._download_main()
+            if downloaded <= 0:
+                raise OSError("Downloaded main.py is empty")
+
+            self._install(remote_version)
+            print("[OTA] Installed version {}; rebooting.".format(remote_version))
+            time.sleep(1)
             machine.reset()
-            return True
-
-        except Exception as e:
-            print(f"[OTA] Engine exception: {e}")
-            return False
+        except Exception as exc:
+            self._remove("main.new.py")
+            gc.collect()
+            print("[OTA] Check failed:", exc)

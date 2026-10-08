@@ -92,6 +92,8 @@ class OTAUpdater:
         with open("version.txt", "w") as version_file:
             version_file.write(remote_version)
 
+        self._remove("main.bak.py")
+
     def check_for_updates(self):
         if "api.github.com/repos/" not in self.repo_api or "/contents" not in self.repo_api:
             print("[OTA] Invalid GitHub repository API URL; skipping.")

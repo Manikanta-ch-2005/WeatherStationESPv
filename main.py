@@ -7,12 +7,14 @@ import json
 import gc
 import socket
 import os
+from ota import OTAUpdater
 
 # =============================================================================
 # 1. Configuration Management
 # =============================================================================
 
 CONFIG_FILE = "config.json"
+OTA_CHECK_INTERVAL_MS = 60000
 
 # Fixed hardware pins
 HARDWARE_CFG = {
@@ -1137,6 +1139,7 @@ class WeatherStation:
         self.cloud = CloudClient(
             self.cfg
         )
+        self.ota = OTAUpdater(self.cfg)
 
     def _initialize_hardware(self):
         print(
@@ -1210,13 +1213,26 @@ class WeatherStation:
 
     def run(self):
         self.cloud.connect_wifi()
-        wdt = WDT(timeout=30000)
+        wdt = WDT(timeout=120000)
         self._initialize_hardware()
         self.rain.init_baseline()
+        last_ota_check_ms = time.ticks_ms()
 
         while True:
             try:
                 wdt.feed()
+
+                if (
+                    self.cloud.is_connected()
+                    and time.ticks_diff(
+                        time.ticks_ms(),
+                        last_ota_check_ms
+                    ) >= OTA_CHECK_INTERVAL_MS
+                ):
+                    last_ota_check_ms = time.ticks_ms()
+                    gc.collect()
+                    self.ota.check_for_updates(wdt)
+                    wdt.feed()
 
                 # Handle local web dashboard/settings.
                 self.web.process_requests()

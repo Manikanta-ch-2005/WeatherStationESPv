@@ -43,7 +43,7 @@ HARDWARE_CFG = {
     }
 }
 
-# These are only defaults.
+# These are only
 # Put the real values in config.json on the ESP32.
 DEFAULT_CONFIG = {
     "wifi_ssid": "YOUR_WIFI_SSID",

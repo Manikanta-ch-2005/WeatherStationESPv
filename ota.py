@@ -7,7 +7,7 @@ import urequests
 
 
 class OTAUpdater:
-    MIN_HEAP = 50000
+    MIN_HEAP = 80000
 
     def __init__(self, config):
         self.config = config
@@ -51,7 +51,7 @@ class OTAUpdater:
         finally:
             response.close()
 
-    def _download_main(self):
+    def _download_main(self, wdt=None):
         response = urequests.get(
             self._url("main.py"),
             headers=self._headers()
@@ -62,6 +62,8 @@ class OTAUpdater:
                 raise OSError("GitHub main.py HTTP {}".format(response.status_code))
             with open("main.new.py", "wb") as firmware_file:
                 while True:
+                    if wdt is not None:
+                        wdt.feed()
                     chunk = response.raw.read(512)
                     if not chunk:
                         break
@@ -94,7 +96,7 @@ class OTAUpdater:
 
         self._remove("main.bak.py")
 
-    def check_for_updates(self):
+    def check_for_updates(self, wdt=None):
         if "api.github.com/repos/" not in self.repo_api or "/contents" not in self.repo_api:
             print("[OTA] Invalid GitHub repository API URL; skipping.")
             return
@@ -132,14 +134,18 @@ class OTAUpdater:
 
         print("[OTA] Checking GitHub ({} bytes free)...".format(free_heap))
         try:
+            if wdt is not None:
+                wdt.feed()
             remote_version = self._fetch_version()
+            if wdt is not None:
+                wdt.feed()
             if not remote_version or remote_version == local_version:
                 print("[OTA] Firmware is up to date.")
                 return
 
             gc.collect()
             self._remove("main.new.py")
-            downloaded = self._download_main()
+            downloaded = self._download_main(wdt)
             if downloaded <= 0:
                 raise OSError("Downloaded main.py is empty")
 

@@ -14,13 +14,12 @@ class OTAUpdater:
         self.repo_api = config.get("ota_repo_api", "").rstrip("/")
         self.branch = config.get("ota_branch", "main")
         self.token = config.get("ota_token", "")
-        repo_path = self.repo_api.split("/repos/", 1)[-1]
-        self.repo_path = repo_path.split("/contents", 1)[0]
 
     def _headers(self):
         headers = {
             "User-Agent": "ESP32-MicroPython-OTA",
             "Accept": "application/vnd.github.raw+json",
+            "X-GitHub-Api-Version": "2022-11-28",
             "Connection": "close"
         }
         if self.token and self.token != "YOUR_GITHUB_TOKEN":
@@ -28,10 +27,10 @@ class OTAUpdater:
         return headers
 
     def _url(self, filename):
-        return "https://raw.githubusercontent.com/{}/{}/{}".format(
-            self.repo_path,
-            self.branch,
-            filename
+        return "{}/{}?ref={}".format(
+            self.repo_api,
+            filename,
+            self.branch
         )
 
     def _remove(self, filename):
